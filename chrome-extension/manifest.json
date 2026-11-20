@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Avito for Codex",
+  "version": "0.1.0",
+  "description": "Send one requested page of Avito seller listings to the local MCP server.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArgzFAEE2JotQWniKHEdYPGVlGKMStmRNxOIgkcMguIPpu5GpyXXKeU9YkflL5FFVKsRThjTH/9CPZlrHhaBOjx09yhS4i0tHe/Zqq+D88p2825qNFmVXakWlJGkmydlK2wX45nzXHBcuONkZk4voo1BpSbiTz99Z3GFeIif7NCe5nWw4txsGC7jLxh/w1GahaABk1FdvLYxCGq2cQb9YCM4RrZDJgyCInjQBBHmoOdzUCffqEvbIk0x+DWhYWqR87jHT2rs+QZF3PwcPxPT+yxkC/OD+GOFE0mIGPh5MSPOWuX9j1P4JDcK1qaajebNLLIYu4+azC8Tdas/j9wr4kQIDAQAB",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Avito for Codex"
+  }
+}

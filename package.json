@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "chrome-extension",
     "README.md",
     "README.en.md",
     "LICENSE"

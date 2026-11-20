@@ -1,12 +1,32 @@
-import { apiUrl, itemPageUrl, locationsApiUrl, MOSCOW, searchApiUrl, sellerRatingsUrl } from "./avito-api.js";
+import {
+  apiUrl,
+  itemPageUrl,
+  locationsApiUrl,
+  MOSCOW,
+  parseItemId,
+  profileItemsApiUrl,
+  PROFILE_ITEMS_PAGE_SIZE,
+  searchApiUrl,
+  sellerRatingsUrl,
+} from "./avito-api.js";
 import { AvitoBrowserSession } from "./browser-session.js";
 
 export { RATE_LIMIT_BACKOFF_MINUTES } from "./browser-session.js";
 import type { RuntimeConfig } from "./config.js";
 import { AvitoMcpError } from "./errors.js";
 import { parseItem, parseSellerUserKey, readBuyerItem } from "./item-page.js";
-import { parseLocations, parseRatingsPage, parseSearchPage } from "./parsers.js";
-import type { ItemDetails, Location, SearchResult, SearchSort, SellerReview, SellerReviewsResult } from "./types.js";
+import { parseLocations, parseProfileItems, parseRatingsPage, parseSearchPage } from "./parsers.js";
+import type {
+  ItemDetails,
+  Location,
+  ProfileItemsResult,
+  SearchResult,
+  SearchSort,
+  SellerReview,
+  SellerReviewsResult,
+} from "./types.js";
+
+export { MAX_ITEM_INPUT_LENGTH, parseItemId } from "./avito-api.js";
 
 export interface SearchInput {
   query: string;
@@ -21,7 +41,6 @@ export interface SearchInput {
 type SellerReviews = Pick<SellerReviewsResult, "rating" | "reviews">;
 
 export const MAX_QUERY_LENGTH = 200;
-export const MAX_ITEM_INPUT_LENGTH = 2_048;
 export const DEFAULT_SEARCH_LIMIT = 20;
 export const MAX_SEARCH_LIMIT = 50;
 export const DEFAULT_REVIEWS_LIMIT = 10;
@@ -31,32 +50,7 @@ export const DEFAULT_SETUP_TIMEOUT_SECONDS = 120;
 export const MAX_SETUP_TIMEOUT_SECONDS = 300;
 const MS_PER_SECOND = 1_000;
 const NO_REVIEWS: SellerReviews = { rating: null, reviews: [] };
-const ITEM_HOSTS = new Set(["avito.ru", "www.avito.ru", "m.avito.ru"]);
-const ITEM_PATH = /^\/(?:(\d+)|[^/]+\/[^/]+\/[^/]+_(\d+))\/?$/;
 const CYRILLIC = /\p{Script=Cyrillic}/u;
-const ITEM_INPUT_HINT = "Item must be an avito.ru listing URL or a numeric listing id.";
-
-export function parseItemId(input: string): number {
-  const value = input.trim();
-  if (!value) throw new AvitoMcpError("INVALID_ITEM", ITEM_INPUT_HINT);
-  if (value.length > MAX_ITEM_INPUT_LENGTH) throw new AvitoMcpError("INVALID_ITEM", "Item value is too long.");
-  if (/^\d+$/.test(value)) return validItemId(value);
-  if (!/^https?:\/\//i.test(value)) throw new AvitoMcpError("INVALID_ITEM", ITEM_INPUT_HINT);
-
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch (error) {
-    throw new AvitoMcpError("INVALID_ITEM", "Item URL is invalid.", { cause: error });
-  }
-  if (url.protocol !== "https:" || !ITEM_HOSTS.has(url.hostname)) {
-    throw new AvitoMcpError("INVALID_ITEM", "Only HTTPS listing URLs on avito.ru are accepted.");
-  }
-  const match = url.pathname.match(ITEM_PATH);
-  const id = match?.[1] ?? match?.[2];
-  if (!id) throw new AvitoMcpError("INVALID_ITEM", "The URL is not an Avito listing page.");
-  return validItemId(id);
-}
 
 export function validSearchQuery(input: SearchInput): string {
   const query = input.query.trim();
@@ -80,6 +74,11 @@ export class AvitoClient {
     return this.session.setup(timeoutSeconds * MS_PER_SECOND, report);
   }
 
+  startSessionSetup(timeoutSeconds = DEFAULT_SETUP_TIMEOUT_SECONDS) {
+    void this.setup(timeoutSeconds).catch(() => undefined);
+    return this.session.getSetupStatus();
+  }
+
   async search(input: SearchInput): Promise<SearchResult> {
     const query = validSearchQuery(input);
     const location = await this.resolveLocation(input.location ?? MOSCOW.name);
@@ -98,6 +97,12 @@ export class AvitoClient {
   async item(item: string): Promise<ItemDetails> {
     const { buyerItem, url } = await this.loadBuyerItem(parseItemId(item));
     return parseItem(buyerItem, url);
+  }
+
+  async profileItems(profile: string, limit = PROFILE_ITEMS_PAGE_SIZE, page = 1): Promise<ProfileItemsResult> {
+    const result = parseProfileItems(await this.session.requestJson(profileItemsApiUrl(profile, page)));
+    const items = result.items.slice(0, limit);
+    return { page, totalCount: result.totalCount, count: items.length, items };
   }
 
   async sellerReviews(item: string, limit = DEFAULT_REVIEWS_LIMIT): Promise<SellerReviewsResult> {
@@ -126,12 +131,13 @@ export class AvitoClient {
         permissions: permissions === null ? null : `0${permissions.toString(8)}`,
       },
       browserChannel: this.config.browserChannel,
+      setup: this.session.getSetupStatus(),
       ...(liveResult ? { live: liveResult } : {}),
     };
   }
 
   shutdown() {
-    return this.session.close();
+    return this.session.shutdown();
   }
 
   private async resolveLocation(name: string): Promise<Location> {
@@ -169,12 +175,4 @@ export class AvitoClient {
 
 function locationKey(name: string): string {
   return name.trim().toLocaleLowerCase("ru-RU");
-}
-
-function validItemId(digits: string): number {
-  const id = Number(digits);
-  if (!Number.isSafeInteger(id) || id <= 0) {
-    throw new AvitoMcpError("INVALID_ITEM", "Listing id is out of range.");
-  }
-  return id;
 }

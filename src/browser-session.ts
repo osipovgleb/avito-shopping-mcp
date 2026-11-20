@@ -6,6 +6,7 @@ import { BLOCK_PAGE_TITLE_PREFIX, classifyResponse, isBlockPageTitle } from "./b
 import type { ResponseVerdict } from "./block-detection.js";
 import type { RuntimeConfig } from "./config.js";
 import { AvitoMcpError, safeError } from "./errors.js";
+import { at, integer, list } from "./json-fields.js";
 import { SerialQueue } from "./serial-queue.js";
 import { SessionStore } from "./session-store.js";
 import type { PersistedSession } from "./session-store.js";
@@ -13,6 +14,7 @@ import type { PersistedSession } from "./session-store.js";
 const VIEWPORT = { width: 1440, height: 900 };
 const LOCALE = "ru-RU";
 const SETUP_TITLE_POLL_INTERVAL_MS = 2_000;
+const VERIFIED_REDIRECT_TIMEOUT_MS = 6_000;
 // Avito's home page keeps navigating after load; ad frames can keep the network busy indefinitely.
 const HOME_NETWORK_IDLE_TIMEOUT_MS = 5_000;
 const NAVIGATION_RECOVERY_TIMEOUT_MS = 5_000;
@@ -56,6 +58,12 @@ export interface SetupResult {
   cookieCount: number;
 }
 
+type SetupStatus =
+  | { status: "idle" }
+  | { status: "pending"; message: string }
+  | { status: "ready"; session: SetupResult }
+  | { status: "failed"; error: ReturnType<typeof safeError> };
+
 export interface LiveSessionCheck {
   ok: boolean;
   error?: ReturnType<typeof safeError>;
@@ -72,20 +80,50 @@ export class AvitoBrowserSession {
   private lastRequestAt = 0;
   private rateLimitedAt: number | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
+  private setupBrowser: Browser | undefined;
+  private setupTask: Promise<SetupResult> | undefined;
+  private setupStatus: SetupStatus = { status: "idle" };
 
   constructor(private readonly config: RuntimeConfig) {
     this.store = new SessionStore(config.stateFile);
   }
 
-  async setup(timeoutMs: number, report: ProgressReporter = () => undefined): Promise<SetupResult> {
+  setup(timeoutMs: number, report: ProgressReporter = () => undefined): Promise<SetupResult> {
+    if (this.setupTask) return this.setupTask;
+
+    const update = (message: string) => {
+      this.setupStatus = { status: "pending", message };
+      report(message);
+    };
+    update(`Opening a temporary Chrome window for Avito session setup. ${SOLVE_IN_WINDOW_HINT}`);
+    this.setupTask = this.queue.run(async () => {
+      try {
+        const result = await this.runSetup(timeoutMs, update);
+        this.rateLimitedAt = undefined;
+        this.setupStatus = { status: "ready", session: result };
+        report("Avito session is ready and stored locally.");
+        return result;
+      } catch (error) {
+        this.setupStatus = { status: "failed", error: safeError(error) };
+        throw error;
+      } finally {
+        this.setupTask = undefined;
+      }
+    });
+    return this.setupTask;
+  }
+
+  getSetupStatus(): SetupStatus {
+    return this.setupStatus;
+  }
+
+  private async runSetup(timeoutMs: number, report: ProgressReporter): Promise<SetupResult> {
     await this.close();
-    report(`Opening a temporary Chrome window for Avito session setup. ${SOLVE_IN_WINDOW_HINT}`);
-
     const browser = await this.launch(false);
-    const context = await browser.newContext({ viewport: VIEWPORT, locale: LOCALE });
-    const page = await context.newPage();
-
+    this.setupBrowser = browser;
     try {
+      const context = await browser.newContext({ viewport: VIEWPORT, locale: LOCALE });
+      const page = await context.newPage();
       await this.openHome(page);
       const outcome = await this.waitForUsableSession(page, Date.now() + timeoutMs, report);
       if (!outcome.ready) {
@@ -93,12 +131,10 @@ export class AvitoBrowserSession {
         this.recordRateLimit(error);
         throw error;
       }
-      const result = await this.saveSession(page, context);
-      report("Avito session is ready and stored locally.");
-      return result;
+      return await this.saveSession(page, context);
     } finally {
-      await context.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
+      this.setupBrowser = undefined;
     }
   }
 
@@ -161,15 +197,29 @@ export class AvitoBrowserSession {
     await browser?.close().catch(() => undefined);
   }
 
+  async shutdown(): Promise<void> {
+    await Promise.all([this.close(), this.setupBrowser?.close().catch(() => undefined)]);
+  }
+
   // Re-probing a throttled IP on a timer keeps it flagged, so after a failed probe
   // only a page load caused by the user in the window triggers the next probe.
   private async waitForUsableSession(page: Page, deadline: number, report: ProgressReporter): Promise<SetupOutcome> {
     let lastProbe: ClassifiedResponse | undefined;
     let challengeRetried = false;
-    while (await this.waitForAccessiblePage(page, deadline, report)) {
+    let verifiedRedirectRecovered = false;
+    while (Date.now() < deadline) {
+      const access = await this.waitForAccessiblePage(page, deadline, report, !verifiedRedirectRecovered);
+      if (access === "timeout") break;
+      if (access === "redirect_stalled") {
+        verifiedRedirectRecovered = true;
+        report("Avito accepted the verification but did not redirect. Reopening Avito once in the same window.");
+        await this.openHome(page, Math.max(1, deadline - Date.now())).catch(() => undefined);
+        continue;
+      }
       const response = await this.rawRequest(page, SEARCH_PROBE_URL, "json");
+      this.lastRequestAt = Date.now();
       lastProbe = { response, verdict: classifyResponse(response) };
-      if (lastProbe.verdict === "ok") return { ready: true };
+      if (lastProbe.verdict === "ok" && isSearchPayload(response.text)) return { ready: true };
 
       if (lastProbe.verdict === "challenge" && !challengeRetried) {
         challengeRetried = true;
@@ -185,16 +235,39 @@ export class AvitoBrowserSession {
     return { ready: false, lastProbe };
   }
 
-  private async waitForAccessiblePage(page: Page, deadline: number, report: ProgressReporter): Promise<boolean> {
+  private async waitForAccessiblePage(
+    page: Page,
+    deadline: number,
+    report: ProgressReporter,
+    checkVerifiedRedirect: boolean,
+  ): Promise<"accessible" | "redirect_stalled" | "timeout"> {
     let reportedBlock = false;
     while (Date.now() < deadline) {
       assertWindowOpen(page);
-      if (!isBlockPageTitle(await page.title().catch(() => ""))) return true;
+      const title = await page.title().catch(() => null);
+      if (title !== null && !isBlockPageTitle(title)) return "accessible";
       if (!reportedBlock) report(`Avito shows an access check. ${SOLVE_IN_WINDOW_HINT}`);
       reportedBlock = true;
+      if (checkVerifiedRedirect && title !== null && await page.getByText("Проверка пройдена").first().isVisible().catch(() => false)) {
+        report("Avito accepted the verification. Waiting for it to open the site.");
+        const timeout = Math.min(VERIFIED_REDIRECT_TIMEOUT_MS, deadline - Date.now());
+        if (timeout <= 0) return "timeout";
+        try {
+          await page.waitForFunction(
+            (prefix) => Boolean(document.title) && !document.title.trim().startsWith(prefix),
+            BLOCK_PAGE_TITLE_PREFIX,
+            { timeout },
+          );
+          return "accessible";
+        } catch (error) {
+          assertWindowOpen(page);
+          if (!(error instanceof errors.TimeoutError)) throw error;
+          return Date.now() < deadline ? "redirect_stalled" : "timeout";
+        }
+      }
       await page.waitForTimeout(SETUP_TITLE_POLL_INTERVAL_MS).catch(() => undefined);
     }
-    return false;
+    return "timeout";
   }
 
   private async saveSession(page: Page, context: BrowserContext): Promise<SetupResult> {
@@ -215,6 +288,9 @@ export class AvitoBrowserSession {
   private async request(url: string, contentType: ContentType): Promise<ClassifiedResponse> {
     if (!isAllowedRequestUrl(url)) {
       throw new AvitoMcpError("REQUEST_FAILED", "Refusing to request a host other than www.avito.ru.");
+    }
+    if (this.setupTask) {
+      throw new AvitoMcpError("SESSION_SETUP_IN_PROGRESS", "Finish the access check in Chrome, then check avito_health.");
     }
 
     return this.queue.run(async () => {
@@ -345,8 +421,11 @@ export class AvitoBrowserSession {
     }
   }
 
-  private async openHome(page: Page): Promise<void> {
-    await page.goto(AVITO_HOME_URL, { waitUntil: "domcontentloaded", timeout: this.config.navigationTimeoutMs });
+  private async openHome(page: Page, timeout = this.config.navigationTimeoutMs): Promise<void> {
+    await page.goto(AVITO_HOME_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: Math.min(timeout, this.config.navigationTimeoutMs),
+    });
   }
 
   private async rawRequest(page: Page, url: string, contentType: ContentType): Promise<RawResponse> {
@@ -400,6 +479,15 @@ export class AvitoBrowserSession {
       void this.close();
     }, this.config.idleTimeoutMs);
     this.idleTimer.unref();
+  }
+}
+
+function isSearchPayload(body: string): boolean {
+  try {
+    const payload: unknown = JSON.parse(body);
+    return integer(at(payload, "totalCount")) !== null && list(at(payload, "catalog", "items")) !== null;
+  } catch {
+    return false;
   }
 }
 

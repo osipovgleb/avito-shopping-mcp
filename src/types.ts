@@ -34,6 +34,15 @@ export interface SearchResult {
   items: SearchItem[];
 }
 
+export type ProfileItem = Pick<SearchItem, "id" | "title" | "price" | "priceText" | "url" | "location">;
+
+export interface ProfileItemsResult {
+  page: number;
+  totalCount: number;
+  count: number;
+  items: ProfileItem[];
+}
+
 export interface Characteristic {
   name: string;
   value: string;

@@ -88,10 +88,26 @@ and characteristics, read the seller's 20 most recent reviews, and list any red 
 | Tool | Purpose |
 | --- | --- |
 | `avito_search` | Search listings: city (default Moscow), sort, price range, page, and limit |
+| `avito_start_export` | Start a background CSV export of up to 1,000 unique search or seller profile listings |
+| `avito_export_status` | Check progress and get the CSV path by `jobId` |
+| `avito_resume_export` | Continue a failed export in the same file from the next unread page |
 | `avito_item` | Read a listing: price, description, characteristics, address, photos, date, views, seller |
 | `avito_seller_reviews` | Read the rating and recent reviews of a listing's seller |
-| `avito_health` | Check the local session; `live=true` sends one lightweight request to Avito |
-| `avito_setup_session` | Create or refresh the session in a separate browser window |
+| `avito_profile_items` | Read active listings from a `/user/<key>/profile` URL. Use `page` to select a page of 12 listings |
+| `avito_profile_items_chrome` | Read the same listings through a tab in your already open Chrome profile |
+| `avito_health` | Check the session and setup progress. With `live=true`, send one lightweight request to Avito |
+| `avito_start_session_setup` | Start setup in a clean temporary Chrome window and return instructions immediately. Complete the Avito access check if it appears |
+| `avito_setup_session` | Start setup and wait for it to finish |
+
+In Codex, call `avito_start_session_setup` and complete any access check in the temporary window. The server verifies search access, saves the working session, and closes the window. Check the result with `avito_health` and `live=false`. The temporary window requires no TCP debugging port.
+
+### Use your existing Chrome profile
+
+1. On macOS or Linux, run `node dist/cli.js install-chrome-bridge` to register the local messaging host. It prints the extension directory.
+2. In the desired Chrome profile, open `chrome://extensions`, enable Developer mode, and select the `chrome-extension` directory with **Load unpacked**.
+3. Ask Codex to call `avito_profile_items_chrome` with the seller URL. In that seller's tab, click **Avito for Codex** from the extensions menu. When the badge shows **OK**, tell Codex to retrieve the result.
+
+The extension requests listings after the click using the tab's current Avito session. It sends listing fields to MCP without exporting cookies or requiring a debugging port.
 
 Pass a listing as `https://www.avito.ru/<city>/<category>/<slug>_<id>` or as a numeric id. Pass the city
 in Russian: `Казань`, `Санкт-Петербург`.

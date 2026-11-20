@@ -1,10 +1,17 @@
+import { AvitoMcpError } from "./errors.js";
 import type { Location, SearchSort } from "./types.js";
 
 export const AVITO_ORIGIN = "https://www.avito.ru";
 export const AVITO_HOME_URL = `${AVITO_ORIGIN}/`;
 export const MOSCOW: Location = { id: 637_640, name: "Москва" };
+export const MAX_ITEM_INPUT_LENGTH = 2_048;
+export const PROFILE_ITEMS_PAGE_SIZE = 12;
 
 const REQUEST_HOST = new URL(AVITO_ORIGIN).hostname;
+const ITEM_HOSTS = new Set(["avito.ru", REQUEST_HOST, "m.avito.ru"]);
+const ITEM_PATH = /^\/(?:(\d+)|(?:[^/]+\/){2,}[^/]+_(\d+))\/?$/;
+const ITEM_INPUT_HINT = "Item must be an avito.ru listing URL or a numeric listing id.";
+const PROFILE_PATH = /^\/user\/([\w-]+)\/profile\/?$/;
 const OUTPUT_HOST_SUFFIXES = ["avito.ru", "avito.st"];
 const SEARCH_API_PATH = "/web/1/js/items";
 const LOCATIONS_API_PATH = "/web/1/slocations";
@@ -50,6 +57,50 @@ export const LIVENESS_PROBE_URL = locationsApiUrl(MOSCOW.name, 1);
 
 export function itemPageUrl(id: number): string {
   return `${AVITO_ORIGIN}/${id}`;
+}
+
+export function parseItemId(input: string): number {
+  const value = input.trim();
+  if (!value) throw new AvitoMcpError("INVALID_ITEM", ITEM_INPUT_HINT);
+  if (value.length > MAX_ITEM_INPUT_LENGTH) throw new AvitoMcpError("INVALID_ITEM", "Item value is too long.");
+  if (/^\d+$/.test(value)) return validItemId(value);
+  if (!/^https?:\/\//i.test(value)) throw new AvitoMcpError("INVALID_ITEM", ITEM_INPUT_HINT);
+
+  const url = parsedUrl(value);
+  if (!url) throw new AvitoMcpError("INVALID_ITEM", "Item URL is invalid.");
+  if (url.protocol !== "https:" || !ITEM_HOSTS.has(url.hostname) || url.port || url.username || url.password) {
+    throw new AvitoMcpError("INVALID_ITEM", "Only HTTPS listing URLs on avito.ru are accepted.");
+  }
+  const match = url.pathname.match(ITEM_PATH);
+  const id = match?.[1] ?? match?.[2];
+  if (!id) throw new AvitoMcpError("INVALID_ITEM", "The URL is not an Avito listing page.");
+  return validItemId(id);
+}
+
+export function profileItemsApiUrl(input: string, page: number): string {
+  const value = input.trim();
+  const url = value.length <= MAX_ITEM_INPUT_LENGTH && /^https:\/\//i.test(value) ? parsedUrl(value) : null;
+  const sellerId = url?.pathname.match(PROFILE_PATH)?.[1];
+  if (
+    !url ||
+    !ITEM_HOSTS.has(url.hostname) ||
+    url.port ||
+    url.username ||
+    url.password ||
+    !sellerId
+  ) {
+    throw new AvitoMcpError("INVALID_INPUT", "Use an HTTPS Avito profile URL of the form /user/<key>/profile.");
+  }
+  const params = new URLSearchParams({
+    categoryId: "0",
+    sellerId,
+    s: SORT_PARAMS.date,
+    page: String(page),
+    limit: String(PROFILE_ITEMS_PAGE_SIZE),
+    noProfileCategoryTree: "true",
+    shortcut: "active",
+  });
+  return `${AVITO_ORIGIN}/web/1/profile/items?${params}`;
 }
 
 export function sellerRatingsUrl(userKey: string): string {
@@ -103,4 +154,12 @@ function parsedUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+function validItemId(digits: string): number {
+  const id = Number(digits);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new AvitoMcpError("INVALID_ITEM", "Listing id is out of range.");
+  }
+  return id;
 }

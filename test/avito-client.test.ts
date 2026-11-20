@@ -24,6 +24,7 @@ describe("parseItemId", () => {
     ).toBe(8_457_820_574);
     expect(parseItemId("https://avito.ru/8457820574")).toBe(8_457_820_574);
     expect(parseItemId("https://m.avito.ru/kazan/telefony/iphone_15_123/")).toBe(123);
+    expect(parseItemId("https://www.avito.ru/kazan/telefony/mobilnye_telefony/iphone_15_123")).toBe(123);
   });
 
   it.each([
@@ -63,5 +64,85 @@ describe("AvitoClient.sellerReviews", () => {
 
     expect(result).toMatchObject({ listing: { id: 8_457_820_574 }, rating: null, count: 0, reviews: [] });
     expect(session.requestJson).not.toHaveBeenCalled();
+  });
+});
+
+describe("AvitoClient.profileItems", () => {
+  const profile = "https://www.avito.ru/user/synthetic-key/profile?id=1234567890&page=2";
+
+  it("requests one JSON page of active listings using the seller key from the profile URL", async () => {
+    session.requestHtml.mockClear();
+    session.requestJson.mockClear().mockResolvedValue({
+      totalCount: 14,
+      catalog: {
+        items: [
+          {
+            id: 1_234_567_890,
+            title: "Блок питания Bloody 850W Gold BD-PS850G-M",
+            urlPath: "/moskva/kompyutery/komplektuyuschie/bloody_1234567890?context=test",
+            priceDetailed: { value: 4_500, fullString: "4\u00a0500 ₽" },
+            addressDetailed: { locationName: "Москва" },
+          },
+          { type: "banner" },
+          {
+            type: "item",
+            id: 1_234_567_891,
+            title: "Другая карточка",
+            urlPath: "/1234567891",
+            priceDetailed: { hasValue: false },
+            location: { name: "Тверь" },
+          },
+        ],
+      },
+    });
+    const client = new AvitoClient({} as RuntimeConfig);
+
+    const result = await client.profileItems(`${profile}#listings`, 12, 2);
+
+    expect(session.requestHtml).not.toHaveBeenCalled();
+    expect(session.requestJson).toHaveBeenCalledExactlyOnceWith(
+      "https://www.avito.ru/web/1/profile/items?categoryId=0&sellerId=synthetic-key&s=104&page=2&limit=12&noProfileCategoryTree=true&shortcut=active",
+    );
+    expect(result).toEqual({
+      page: 2,
+      totalCount: 14,
+      count: 2,
+      items: [
+        {
+          id: 1_234_567_890,
+          title: "Блок питания Bloody 850W Gold BD-PS850G-M",
+          price: 4_500,
+          priceText: "4 500 ₽",
+          url: "https://www.avito.ru/moskva/kompyutery/komplektuyuschie/bloody_1234567890",
+          location: "Москва",
+        },
+        {
+          id: 1_234_567_891,
+          title: "Другая карточка",
+          price: null,
+          priceText: null,
+          url: "https://www.avito.ru/1234567891",
+          location: "Тверь",
+        },
+      ],
+    });
+    await expect(client.profileItems(profile, 1, 2)).resolves.toEqual({ ...result, count: 1, items: result.items.slice(0, 1) });
+  });
+
+  it.each([
+    "https://example.com/user/key/profile",
+    "https://www.avito.ru:444/user/key/profile",
+    "https://www.avito.ru/1234567890",
+  ])("rejects %s before requesting JSON", async (url) => {
+    session.requestJson.mockClear();
+    await expect(new AvitoClient({} as RuntimeConfig).profileItems(url)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(session.requestJson).not.toHaveBeenCalled();
+  });
+
+  it("reports an invalid payload separately from an empty catalog", async () => {
+    session.requestJson.mockResolvedValueOnce({ totalCount: 0 }).mockResolvedValueOnce({ totalCount: 0, catalog: { items: [] } });
+    const client = new AvitoClient({} as RuntimeConfig);
+    await expect(client.profileItems(profile)).rejects.toMatchObject({ code: "AVITO_RESPONSE_INVALID" });
+    await expect(client.profileItems(profile)).resolves.toEqual({ page: 1, totalCount: 0, count: 0, items: [] });
   });
 });

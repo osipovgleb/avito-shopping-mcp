@@ -1,6 +1,6 @@
 import { isAllowedOutputUrl, publicUrl } from "./avito-api.js";
 import { array, at, decimal, integer, isPresent, list, required, text } from "./json-fields.js";
-import type { Location, RatingSummary, ScoreCount, SearchItem, SearchSeller, SellerReview } from "./types.js";
+import type { Location, ProfileItem, RatingSummary, ScoreCount, SearchItem, SearchSeller, SellerReview } from "./types.js";
 
 export interface SearchPage {
   totalCount: number;
@@ -35,6 +35,17 @@ export function parseSearchPage(response: unknown, searchLocation: Location): Se
   };
 }
 
+export function parseProfileItems(response: unknown): { totalCount: number; items: ProfileItem[] } {
+  const entries = required(list(at(response, "catalog", "items")), "catalog.items");
+  const items = entries.flatMap((entry, index) => {
+    const type = at(entry, "type");
+    if (type !== undefined && type !== LISTING_TYPE) return [];
+    const item = listingSummary(entry, `catalog.items[${index}]`);
+    return [{ ...item, location: item.location ?? text(at(entry, "location", "name")) }];
+  });
+  return { totalCount: required(integer(at(response, "totalCount")), "totalCount"), items };
+}
+
 export function parseLocations(response: unknown): Location[] {
   return required(list(at(response, "result", "locations")), "result.locations").map((entry, index) => ({
     id: required(integer(at(entry, "id")), `result.locations[${index}].id`),
@@ -53,22 +64,27 @@ export function parseRatingsPage(response: unknown): RatingsPage {
 }
 
 function searchItem(entry: unknown, path: string, searchLocation: Location): SearchItem {
-  const hasPrice = at(entry, "priceDetailed", "hasValue") !== false;
+  const item = listingSummary(entry, path);
   const publishedAt = integer(at(entry, "sortTimeStamp"));
   const image = text(at(array(at(entry, "images"))[0], SEARCH_IMAGE_SIZE));
+  return {
+    ...item,
+    location: item.location ?? locationNameIfWithin(entry, searchLocation),
+    publishedAt: publishedAt === null ? null : new Date(publishedAt).toISOString(),
+    image: image !== null && isAllowedOutputUrl(image) ? image : null,
+    seller: searchSeller(entry),
+  };
+}
+
+function listingSummary(entry: unknown, path: string): ProfileItem {
+  const hasPrice = at(entry, "priceDetailed", "hasValue") !== false;
   return {
     id: required(integer(at(entry, "id")), `${path}.id`),
     title: required(text(at(entry, "title")), `${path}.title`),
     price: hasPrice ? integer(at(entry, "priceDetailed", "value")) : null,
     priceText: displayText(at(entry, "priceDetailed", "fullString")),
     url: required(publicUrl(required(text(at(entry, "urlPath")), `${path}.urlPath`)), `${path}.urlPath`),
-    location:
-      text(at(entry, "addressDetailed", "locationName")) ??
-      text(at(entry, "geo", "formattedAddress")) ??
-      locationNameIfWithin(entry, searchLocation),
-    publishedAt: publishedAt === null ? null : new Date(publishedAt).toISOString(),
-    image: image !== null && isAllowedOutputUrl(image) ? image : null,
-    seller: searchSeller(entry),
+    location: text(at(entry, "addressDetailed", "locationName")) ?? text(at(entry, "geo", "formattedAddress")),
   };
 }
 

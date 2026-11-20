@@ -2,6 +2,7 @@
 
 import { loadConfig } from "./config.js";
 import { safeError } from "./errors.js";
+import { installChromeBridge } from "./install-chrome-bridge.js";
 import { serve } from "./mcp-server.js";
 import {
   AvitoClient,
@@ -29,6 +30,7 @@ function printHelp(): void {
 
 Usage:
   avito-shopping-mcp setup [--timeout ${DEFAULT_SETUP_TIMEOUT_SECONDS}]  Create or refresh the local Avito session
+  avito-shopping-mcp install-chrome-bridge  Register the Chrome extension's local messaging host
   avito-shopping-mcp doctor                 Verify configuration and the saved session
   avito-shopping-mcp serve                  Run the MCP server over stdio
   avito-shopping-mcp help                   Show this help
@@ -37,7 +39,12 @@ Usage:
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "serve";
-  const client = new AvitoClient(loadConfig());
+  if (command === "install-chrome-bridge") {
+    console.log(JSON.stringify(await installChromeBridge(), null, 2));
+    return;
+  }
+  const config = loadConfig();
+  const client = new AvitoClient(config);
 
   if (command === "setup") {
     const result = await client.setup(timeoutArgument(process.argv.slice(3)), (message) => console.error(message));
@@ -63,7 +70,7 @@ async function main(): Promise<void> {
     };
     process.once("SIGINT", () => void shutdown());
     process.once("SIGTERM", () => void shutdown());
-    serve(client);
+    serve(client, config.stateDir);
     return;
   }
 
