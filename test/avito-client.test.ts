@@ -67,6 +67,22 @@ describe("AvitoClient.sellerReviews", () => {
   });
 });
 
+describe("AvitoClient.search condition", () => {
+  it("keeps Avito sort order and checks the structured card state using the same interval", async () => {
+    session.requestJson.mockReset().mockResolvedValueOnce(jsonFixture("search-web1-js-items.json"));
+    const buyerItem = at(jsonFixture("item-hydration-buyerItem.json"), "buyerItem");
+    session.requestHtml.mockReset().mockResolvedValueOnce({ url: LISTING_URL, html: itemPageHtml(buyerItem) });
+
+    const result = await new AvitoClient({} as RuntimeConfig).search({
+      query: "кофемашина", sort: "price", condition: "used", limit: 1, requestIntervalSeconds: 12,
+    });
+
+    expect(session.requestJson).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("&s=1&"), 12);
+    expect(session.requestHtml).toHaveBeenCalledExactlyOnceWith("https://www.avito.ru/8457820574", 12);
+    expect(result.items).toEqual([expect.objectContaining({ id: 8_457_820_574, condition: "used" })]);
+  });
+});
+
 describe("AvitoClient.profileItems", () => {
   const profile = "https://www.avito.ru/user/synthetic-key/profile?id=1234567890&page=2";
 
@@ -79,6 +95,7 @@ describe("AvitoClient.profileItems", () => {
           {
             id: 1_234_567_890,
             title: "Блок питания Bloody 850W Gold BD-PS850G-M",
+            description: "Блок питания в рабочем состоянии.",
             urlPath: "/moskva/kompyutery/komplektuyuschie/bloody_1234567890?context=test",
             priceDetailed: { value: 4_500, fullString: "4\u00a0500 ₽" },
             addressDetailed: { locationName: "Москва" },
@@ -102,6 +119,7 @@ describe("AvitoClient.profileItems", () => {
     expect(session.requestHtml).not.toHaveBeenCalled();
     expect(session.requestJson).toHaveBeenCalledExactlyOnceWith(
       "https://www.avito.ru/web/1/profile/items?categoryId=0&sellerId=synthetic-key&s=104&page=2&limit=12&noProfileCategoryTree=true&shortcut=active",
+      undefined,
     );
     expect(result).toEqual({
       page: 2,
@@ -111,6 +129,7 @@ describe("AvitoClient.profileItems", () => {
         {
           id: 1_234_567_890,
           title: "Блок питания Bloody 850W Gold BD-PS850G-M",
+          description: "Блок питания в рабочем состоянии.",
           price: 4_500,
           priceText: "4 500 ₽",
           url: "https://www.avito.ru/moskva/kompyutery/komplektuyuschie/bloody_1234567890",

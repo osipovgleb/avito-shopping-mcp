@@ -88,7 +88,7 @@ and characteristics, read the seller's 20 most recent reviews, and list any red 
 | Tool | Purpose |
 | --- | --- |
 | `avito_search` | Search listings: city (default Moscow), sort, price range, page, and limit |
-| `avito_start_export` | Start a background CSV export of up to 1,000 unique search or seller profile listings |
+| `avito_start_export` | Export the number of unique search or seller profile listings specified in `limit` |
 | `avito_export_status` | Check progress and get the CSV path by `jobId` |
 | `avito_resume_export` | Continue a failed export in the same file from the next unread page |
 | `avito_item` | Read a listing: price, description, characteristics, address, photos, date, views, seller |
@@ -98,6 +98,10 @@ and characteristics, read the seller's 20 most recent reviews, and list any red 
 | `avito_health` | Check the session and setup progress. With `live=true`, send one lightweight request to Avito |
 | `avito_start_session_setup` | Start setup in a clean temporary Chrome window and return instructions immediately. Complete the Avito access check if it appears |
 | `avito_setup_session` | Start setup and wait for it to finish |
+
+Set the CSV export's `limit` explicitly. The `description` column uses the text supplied with the listing in the results, which Avito may shorten. The cell is empty when Avito omits it.
+
+Search and search-based exports support `sort` (`default`, `price`, `price_desc`, `date`, `discount`). Use `condition` to select `any` (the default), `new`, or `used`. The `new` and `used` filters check candidate detail pages and skip listings with unknown condition. CSV exports include `has_vas` and `is_xl` if Avito exposes those signals. They are not proof of payment.
 
 In Codex, call `avito_start_session_setup` and complete any access check in the temporary window. The server verifies search access, saves the working session, and closes the window. Check the result with `avito_health` and `live=false`. The temporary window requires no TCP debugging port.
 
@@ -116,9 +120,9 @@ in Russian: `Казань`, `Санкт-Петербург`.
 
 Avito quickly restricts an IP address that sends many requests. Therefore:
 
-- requests run strictly one at a time, at least 5 seconds apart (`AVITO_MCP_MIN_REQUEST_INTERVAL_MS`) plus
-  random jitter;
-- a search costs 1 request, a listing 1, seller reviews 2–3;
+- requests run one at a time. The default base interval between request starts is 5 seconds
+  (`AVITO_MCP_MIN_REQUEST_INTERVAL_MS`). Use `requestIntervalSeconds` to override it for an export, search, seller profile, listing, or reviews call. The server adds up to 2 seconds of jitter;
+- a search page costs 1 request, plus a listing request per candidate if filtering by condition. A listing costs 1 request and seller reviews cost 2–3;
 - after `AVITO_RATE_LIMITED`, the server stops contacting Avito for 20 minutes and returns that error with the
   remaining time; to resume sooner, run `npx avito-shopping-mcp setup` and solve the captcha in the browser
   window, since a new session lifts the pause; Avito bans sometimes last an hour or longer;

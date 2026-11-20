@@ -18,10 +18,11 @@ import {
   RATE_LIMIT_BACKOFF_MINUTES,
 } from "./avito-client.js";
 import type { AvitoClient } from "./avito-client.js";
+import { MAX_REQUEST_INTERVAL_SECONDS } from "./browser-session.js";
 import { ChromeBridge } from "./chrome-bridge.js";
 import { AvitoMcpError, safeError } from "./errors.js";
-import { ListingsExport, MAX_EXPORT_LIMIT } from "./listings-export.js";
-import { SEARCH_SORTS } from "./types.js";
+import { ListingsExport } from "./listings-export.js";
+import { LISTING_CONDITIONS, SEARCH_SORTS } from "./types.js";
 import { VERSION } from "./version.js";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -40,6 +41,10 @@ const ITEM_INPUT = z
   .max(MAX_ITEM_INPUT_LENGTH)
   .describe("Avito listing URL (https://www.avito.ru/<city>/<category>/<slug>_<id>) or numeric listing id");
 const PROFILE_INPUT = z.string().trim().min(1).max(MAX_ITEM_INPUT_LENGTH).describe("Full HTTPS Avito /user/<key>/profile URL");
+const REQUEST_INTERVAL = z.number().int().min(1).max(MAX_REQUEST_INTERVAL_SECONDS).optional()
+  .describe("Base interval in seconds between Avito requests. Adds 0–2 seconds of jitter. Defaults to the server setting (normally 5 seconds).");
+const CONDITION = z.enum(LISTING_CONDITIONS).optional()
+  .describe("any (default), new, or used. New/used verifies the condition in each candidate's listing details and skips unknowns.");
 const SEARCH_FILTERS = {
   query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).describe("Search text"),
   location: z.string().trim().min(1).max(100).optional().describe("City or region in Russian (default: Москва)"),
@@ -53,7 +58,8 @@ const INSTRUCTIONS =
   "Use avito_search to find classified listings, then pass a returned listing URL or id to avito_item for details " +
   "or to avito_seller_reviews for the seller's reviews. Searches default to Москва; pass a Russian city name as location for another city. " +
   "Use avito_profile_items when you have a link to an Avito /user/<key>/profile page. " +
-  "For bulk collection or CSV, call avito_start_export once with the requested filters and limit. " +
+  "For bulk collection or CSV, call avito_start_export once with the requested filters and explicitly set limit to the number of listings needed. " +
+  "Use condition=any unless the user asks for new or used items. Checking condition adds one listing request per candidate. " +
   "Poll avito_export_status by jobId to report written/requested and read the CSV from csvPath when done. " +
   "If the export fails, report its saved row count; after access is restored, avito_resume_export continues the same CSV. " +
   "When the user wants to use their already open Chrome profile, use avito_profile_items_chrome and guide them through the extension click. " +
@@ -99,10 +105,12 @@ export function createServer(client: AvitoClient, stateDir: string): McpServer {
     {
       title: "Search Avito listings",
       description:
-        "Search Avito classifieds in one city. Returns listing ids, titles, prices, URLs, publication time, an image, and seller name and rating when Avito shows them.",
+        "Search Avito classifieds in one city. Returns listing ids, titles, prices, URLs, publication time, an image, seller data, and VAS/XL indicators when Avito shows them. These indicators do not verify payment.",
       inputSchema: z.object({
         ...SEARCH_FILTERS,
         sort: SEARCH_FILTERS.sort.default("default"),
+        condition: CONDITION,
+        requestIntervalSeconds: REQUEST_INTERVAL,
         page: z.number().int().min(1).default(1).describe("Result page; Avito pages hold 50 listings"),
         limit: z.number().int().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT).describe("Listings to return from the page"),
       }),
@@ -115,22 +123,26 @@ export function createServer(client: AvitoClient, stateDir: string): McpServer {
     "avito_start_export",
     {
       title: "Start a bulk Avito CSV export",
-      description: "Collect up to 1,000 unique listings into a local CSV in the background. Provide search filters or one seller profile URL. Returns a jobId for avito_export_status.",
+      description: "Collect the requested number of unique listings into a local CSV in the background, up to the available results. Includes any description snippets provided in the results. Provide search filters or one seller profile URL and set limit. Returns a jobId for avito_export_status.",
       inputSchema: z.strictObject({
         ...SEARCH_FILTERS,
         query: SEARCH_FILTERS.query.optional(),
         sort: SEARCH_FILTERS.sort.optional(),
         profile: PROFILE_INPUT.optional(),
+        condition: CONDITION,
+        requestIntervalSeconds: REQUEST_INTERVAL,
         startPage: z.number().int().min(1).default(1).describe("First result page to read"),
-        limit: z.number().int().min(1).max(MAX_EXPORT_LIMIT).default(MAX_EXPORT_LIMIT).describe("Maximum unique listings to write"),
+        limit: z.number().int().positive().describe("Number of unique listings needed for this task"),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    ({ profile, query, location, sort, priceMin, priceMax, startPage, limit }) => run(async () => {
+    ({ profile, query, location, sort, priceMin, priceMax, startPage, limit, requestIntervalSeconds, condition }) => run(async () => {
       if (profile && [query, location, sort, priceMin, priceMax].every((filter) => filter === undefined)) {
-        return { ...exports.start({ profile, startPage, limit }) };
+        return { ...exports.start({ profile, startPage, limit, requestIntervalSeconds, condition }) };
       }
-      if (query && !profile) return { ...exports.start({ query, location, sort, priceMin, priceMax, startPage, limit }) };
+      if (query && !profile) {
+        return { ...exports.start({ query, location, sort, priceMin, priceMax, startPage, limit, requestIntervalSeconds, condition }) };
+      }
       throw new AvitoMcpError("INVALID_INPUT", "Pass either a search query with optional filters or a seller profile URL.");
     }),
   );
@@ -163,10 +175,10 @@ export function createServer(client: AvitoClient, stateDir: string): McpServer {
       title: "Get an Avito listing",
       description:
         "Get one Avito listing: price, description, characteristics, address and coordinates, photos, publication date, views, and seller profile.",
-      inputSchema: z.object({ item: ITEM_INPUT }),
+      inputSchema: z.object({ item: ITEM_INPUT, requestIntervalSeconds: REQUEST_INTERVAL }),
       annotations: READ_ONLY,
     },
-    ({ item }) => run(() => client.item(item)),
+    ({ item, requestIntervalSeconds }) => run(() => client.item(item, requestIntervalSeconds)),
   );
 
   server.registerTool(
@@ -177,11 +189,12 @@ export function createServer(client: AvitoClient, stateDir: string): McpServer {
         "Read the newest reviews of the seller behind an Avito listing, with the seller's overall rating and score distribution. Reviews cover all of the seller's deals, not only this listing.",
       inputSchema: z.object({
         item: ITEM_INPUT,
+        requestIntervalSeconds: REQUEST_INTERVAL,
         limit: z.number().int().min(1).max(MAX_REVIEWS_LIMIT).default(DEFAULT_REVIEWS_LIMIT).describe("Reviews to return, newest first"),
       }),
       annotations: READ_ONLY,
     },
-    ({ item, limit }) => run(() => client.sellerReviews(item, limit)),
+    ({ item, limit, requestIntervalSeconds }) => run(() => client.sellerReviews(item, limit, requestIntervalSeconds)),
   );
 
   server.registerTool(
@@ -192,12 +205,13 @@ export function createServer(client: AvitoClient, stateDir: string): McpServer {
         "Read active listings from an Avito seller's profile, newest first. Returns listing ids, titles, prices, links, and locations when available.",
       inputSchema: z.object({
         profile: PROFILE_INPUT,
+        requestIntervalSeconds: REQUEST_INTERVAL,
         page: z.number().int().min(1).default(1).describe("Result page; Avito profile pages hold 12 listings"),
         limit: z.number().int().min(1).max(MAX_SEARCH_LIMIT).default(PROFILE_ITEMS_PAGE_SIZE).describe("Maximum listings to return from the page"),
       }),
       annotations: READ_ONLY,
     },
-    ({ profile, limit, page }) => run(() => client.profileItems(profile, limit, page)),
+    ({ profile, limit, page, requestIntervalSeconds }) => run(() => client.profileItems(profile, limit, page, requestIntervalSeconds)),
   );
 
   server.registerTool(

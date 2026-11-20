@@ -17,6 +17,9 @@ describe("parseSearchPage", () => {
     expect(page.items[0]).toEqual({
       id: 8_457_820_574,
       title: "Кофемашина delonghi magnifica rapid cappuccino",
+      description: expect.stringContaining("Кофе машина Делонги"),
+      hasVas: false,
+      isXl: false,
       price: 14_000,
       priceText: "14 000 ₽",
       url: "https://www.avito.ru/moskva/bytovaya_tehnika/kofemashina_delonghi_magnifica_rapid_cappuccino_8457820574",
@@ -29,6 +32,18 @@ describe("parseSearchPage", () => {
         rating: 5,
       },
     });
+  });
+
+  it("reports promotion signals when present and leaves unknown flags absent", () => {
+    const listing = { type: "item", id: 1, title: "Диван", urlPath: "/moskva/mebel/divan_1" };
+    const xl = {
+      ...listing, id: 2, isXl: true,
+      iva: { DateInfoStep: [{ componentData: { component: "vas" }, payload: { vas: [{ title: "XL" }] } }] },
+    };
+    const page = parseSearchPage({ totalCount: 2, catalog: { items: [listing, xl] } }, MOSCOW);
+    expect(page.items[0]).not.toHaveProperty("hasVas");
+    expect(page.items[0]).not.toHaveProperty("isXl");
+    expect(page.items[1]).toMatchObject({ hasVas: true, isXl: true });
   });
 
   it("names a listing by its own address, else by the searched location it lies in", () => {

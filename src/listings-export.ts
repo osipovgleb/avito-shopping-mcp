@@ -7,14 +7,14 @@ import { PROFILE_ITEMS_PAGE_SIZE, profileItemsApiUrl } from "./avito-api.js";
 import { MAX_SEARCH_LIMIT, validSearchQuery } from "./avito-client.js";
 import type { AvitoClient, SearchInput } from "./avito-client.js";
 import { AvitoMcpError, safeError } from "./errors.js";
-import type { ProfileItem, SearchItem } from "./types.js";
-
-export const MAX_EXPORT_LIMIT = 1_000;
+import type { ListingCondition, ListingConditionFilter, ProfileItem, SearchItem } from "./types.js";
 
 type Listing = ProfileItem | SearchItem;
-type ExportInput = (Omit<SearchInput, "page" | "limit"> | { profile: string }) & {
+type ExportInput = (Omit<SearchInput, "page" | "limit" | "requestIntervalSeconds" | "condition"> | { profile: string }) & {
   startPage: number;
   limit: number;
+  requestIntervalSeconds?: number | undefined;
+  condition?: ListingConditionFilter | undefined;
 };
 
 interface ExportStatus {
@@ -34,15 +34,16 @@ interface ExportJob {
   progress: ExportStatus;
   seen: Set<number>;
   pages: Set<string>;
+  conditions: Map<number, ListingCondition | null>;
   lastPage?: number;
 }
 
 const CSV_HEADER =
-  "id,title,price,price_text,url,location,published_at,image,seller_name,seller_url,seller_rating\r\n";
+  "id,title,price,price_text,url,location,published_at,image,seller_name,seller_url,seller_rating,description,has_vas,is_xl,condition\r\n";
 
-function csvCell(value: string | number | null): string {
+function csvCell(value: string | number | boolean | null): string {
   if (value === null) return "";
-  if (typeof value === "number") return String(value);
+  if (typeof value !== "string") return String(value);
   // Keep marketplace text literal when the CSV is opened in a spreadsheet editor.
   const literal = /^[\t\r\n]|^\s*[=+\-@＝＋－＠]/u.test(value) ? "'" + value : value;
   return '"' + literal.replaceAll('"', '""') + '"';
@@ -53,7 +54,8 @@ function csvRow(item: Listing): string {
   return [
     item.id, item.title, item.price, item.priceText, item.url, item.location,
     search?.publishedAt ?? null, search?.image ?? null, search?.seller?.name ?? null,
-    search?.seller?.url ?? null, search?.seller?.rating ?? null,
+    search?.seller?.url ?? null, search?.seller?.rating ?? null, item.description ?? null,
+    item.hasVas ?? null, item.isXl ?? null, item.condition ?? null,
   ].map(csvCell).join(",") + "\r\n";
 }
 
@@ -62,12 +64,15 @@ export class ListingsExport {
   private active: ExportStatus | undefined;
 
   constructor(
-    private readonly client: Pick<AvitoClient, "search" | "profileItems">,
+    private readonly client: Pick<AvitoClient, "search" | "profileItems" | "listingCondition">,
     private readonly directory: string,
   ) {}
 
   start(input: ExportInput): ExportStatus {
     this.ensureIdle();
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new AvitoMcpError("INVALID_INPUT", "Export limit must be a positive integer.");
+    }
     if ("profile" in input) profileItemsApiUrl(input.profile, input.startPage);
     else validSearchQuery(input);
 
@@ -80,7 +85,7 @@ export class ListingsExport {
       nextPage: input.startPage,
       csvPath: null,
     };
-    const job: ExportJob = { input, progress, seen: new Set(), pages: new Set() };
+    const job: ExportJob = { input, progress, seen: new Set(), pages: new Set(), conditions: new Map() };
     this.jobs.set(progress.jobId, job);
     return this.run(job);
   }
@@ -120,10 +125,10 @@ export class ListingsExport {
   }
 
   private async collect(job: ExportJob): Promise<void> {
-    const { input, progress, seen, pages } = job;
+    const { input: { condition, ...input }, progress, seen, pages, conditions } = job;
     const pageSize = "profile" in input ? PROFILE_ITEMS_PAGE_SIZE : MAX_SEARCH_LIMIT;
     const fetchPage = (page: number) => "profile" in input
-      ? this.client.profileItems(input.profile, pageSize, page)
+      ? this.client.profileItems(input.profile, pageSize, page, input.requestIntervalSeconds)
       : this.client.search({ ...input, limit: pageSize, page });
     let uninitializedPath: string | undefined;
     try {
@@ -144,10 +149,23 @@ export class ListingsExport {
           job.lastPage ??= Math.ceil(totalCount / pageSize);
           const signature = items.map(({ id }) => id).sort((a, b) => a - b).join(",");
           const rows = new Map<number, string>();
-          for (const item of items) {
-            if (seen.has(item.id) || rows.has(item.id)) continue;
-            rows.set(item.id, csvRow(item));
-            if (progress.written + rows.size === input.limit) break;
+          let lookupFailure: { error: unknown } | undefined;
+          try {
+            for (const item of items) {
+              if (seen.has(item.id) || rows.has(item.id)) continue;
+              let row: Listing = item;
+              if (condition && condition !== "any") {
+                if (!conditions.has(item.id)) {
+                  conditions.set(item.id, await this.client.listingCondition(item.id, input.requestIntervalSeconds));
+                }
+                if (conditions.get(item.id) !== condition) continue;
+                row = { ...item, condition };
+              }
+              rows.set(item.id, csvRow(row));
+              if (progress.written + rows.size === input.limit) break;
+            }
+          } catch (error) {
+            lookupFailure = { error };
           }
           if (rows.size > 0) {
             const batch = [...rows.values()].join("");
@@ -161,6 +179,7 @@ export class ListingsExport {
             for (const id of rows.keys()) seen.add(id);
           }
           progress.written += rows.size;
+          if (lookupFailure) throw lookupFailure.error;
           progress.pagesRead++;
           progress.nextPage++;
           if (progress.written === input.limit) progress.stopReason = "limit_reached";
@@ -174,6 +193,7 @@ export class ListingsExport {
       progress.status = "completed";
       seen.clear();
       pages.clear();
+      conditions.clear();
     } catch (error) {
       if (uninitializedPath) await unlink(uninitializedPath).catch(() => undefined);
       progress.status = "failed";

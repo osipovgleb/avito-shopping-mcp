@@ -1,5 +1,8 @@
 export const SEARCH_SORTS = ["default", "price", "price_desc", "date", "discount"] as const;
 export type SearchSort = (typeof SEARCH_SORTS)[number];
+export const LISTING_CONDITIONS = ["any", "new", "used"] as const;
+export type ListingConditionFilter = (typeof LISTING_CONDITIONS)[number];
+export type ListingCondition = Exclude<ListingConditionFilter, "any">;
 
 export interface Location {
   id: number;
@@ -15,6 +18,10 @@ export interface SearchSeller {
 export interface SearchItem {
   id: number;
   title: string;
+  description?: string;
+  hasVas?: boolean;
+  isXl?: boolean;
+  condition?: ListingCondition;
   price: number | null;
   priceText: string | null;
   url: string;
@@ -34,7 +41,9 @@ export interface SearchResult {
   items: SearchItem[];
 }
 
-export type ProfileItem = Pick<SearchItem, "id" | "title" | "price" | "priceText" | "url" | "location">;
+export type ProfileItem = Pick<SearchItem,
+  "id" | "title" | "description" | "price" | "priceText" | "url" | "location" | "hasVas" | "isXl" | "condition"
+>;
 
 export interface ProfileItemsResult {
   page: number;

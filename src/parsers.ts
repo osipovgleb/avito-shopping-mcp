@@ -1,5 +1,5 @@
 import { isAllowedOutputUrl, publicUrl } from "./avito-api.js";
-import { array, at, decimal, integer, isPresent, list, required, text } from "./json-fields.js";
+import { array, at, boolean, decimal, integer, isPresent, list, required, text } from "./json-fields.js";
 import type { Location, ProfileItem, RatingSummary, ScoreCount, SearchItem, SearchSeller, SellerReview } from "./types.js";
 
 export interface SearchPage {
@@ -78,9 +78,17 @@ function searchItem(entry: unknown, path: string, searchLocation: Location): Sea
 
 function listingSummary(entry: unknown, path: string): ProfileItem {
   const hasPrice = at(entry, "priceDetailed", "hasValue") !== false;
+  const description = text(at(entry, "description"));
+  const vasComponent = array(at(entry, "iva", "DateInfoStep"))
+    .find((step) => at(step, "componentData", "component") === "vas");
+  const vas = list(at(vasComponent, "payload", "vas"));
+  const isXl = boolean(at(entry, "isXl"));
   return {
     id: required(integer(at(entry, "id")), `${path}.id`),
     title: required(text(at(entry, "title")), `${path}.title`),
+    ...(description === null ? {} : { description }),
+    ...(vas === null ? {} : { hasVas: vas.length > 0 }),
+    ...(isXl === null ? {} : { isXl }),
     price: hasPrice ? integer(at(entry, "priceDetailed", "value")) : null,
     priceText: displayText(at(entry, "priceDetailed", "fullString")),
     url: required(publicUrl(required(text(at(entry, "urlPath")), `${path}.urlPath`)), `${path}.urlPath`),

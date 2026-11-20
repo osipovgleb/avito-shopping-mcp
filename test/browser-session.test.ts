@@ -138,6 +138,38 @@ describe("AvitoBrowserSession", () => {
     expect(avito.waitForLoadState).toHaveBeenCalledWith("networkidle", expect.anything());
   });
 
+  it("counts response time toward the gap between consecutive request starts", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    avito.evaluate.mockReset().mockImplementation(async () => {
+      now += 10;
+      return { status: 200, text: "{}", url: PROBE_URL };
+    });
+
+    await Promise.all([session.requestJson(PROBE_URL), session.requestJson(PROBE_URL)]);
+
+    expect(avito.evaluate).toHaveBeenCalledTimes(2);
+    expect(timeout).not.toHaveBeenCalledWith(expect.any(Function), 1);
+  });
+
+  it("uses the requested base interval and keeps the random delay", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.mocked(Math.random).mockReturnValue(0.5);
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    avito.evaluate.mockReset().mockImplementation(async () => {
+      now += 12_985;
+      return { status: 200, text: "{}", url: PROBE_URL };
+    });
+
+    await session.requestJson(PROBE_URL, 12);
+    await session.requestJson(PROBE_URL, 12);
+
+    expect(avito.evaluate).toHaveBeenCalledTimes(2);
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), 15);
+  });
+
   it("resumes once a newer session is stored", async () => {
     await expect(session.requestJson(PROBE_URL)).rejects.toMatchObject({ code: "AVITO_RATE_LIMITED" });
     await store.save(storedSession(new Date(Date.now() + 1)));

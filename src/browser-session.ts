@@ -21,6 +21,7 @@ const NAVIGATION_RECOVERY_TIMEOUT_MS = 5_000;
 const CONTEXT_LOST_ERROR = /Execution context was destroyed|because of a navigation/i;
 const CHALLENGE_TIMEOUT_MS = 20_000;
 const MAX_REQUEST_JITTER_MS = 2_000;
+export const MAX_REQUEST_INTERVAL_SECONDS = Math.floor((2_147_483_647 - MAX_REQUEST_JITTER_MS) / 1_000);
 const SETUP_COMMAND = "`avito-shopping-mcp setup`";
 const SOLVE_IN_WINDOW_HINT = "Solve any captcha in the opened browser window yourself and keep the window open.";
 const MS_PER_SECOND = 1_000;
@@ -138,8 +139,8 @@ export class AvitoBrowserSession {
     }
   }
 
-  async requestJson(url: string): Promise<unknown> {
-    const { response, verdict } = await this.request(url, "json");
+  async requestJson(url: string, requestIntervalSeconds?: number): Promise<unknown> {
+    const { response, verdict } = await this.request(url, "json", requestIntervalSeconds);
     if (verdict === "not_found") {
       throw new AvitoMcpError("REQUEST_FAILED", "Avito returned HTTP 404 for an internal endpoint.");
     }
@@ -157,8 +158,8 @@ export class AvitoBrowserSession {
    * @param url HTTPS URL on www.avito.ru.
    * @returns The final page URL and HTML, or `null` when Avito answers 404.
    */
-  async requestHtml(url: string): Promise<FetchedPage | null> {
-    const { response, verdict } = await this.request(url, "html");
+  async requestHtml(url: string, requestIntervalSeconds?: number): Promise<FetchedPage | null> {
+    const { response, verdict } = await this.request(url, "html", requestIntervalSeconds);
     if (verdict === "not_found") return null;
     if (!isAllowedRequestUrl(response.url)) {
       throw new AvitoMcpError("AVITO_RESPONSE_INVALID", "Avito redirected outside www.avito.ru.");
@@ -285,7 +286,7 @@ export class AvitoBrowserSession {
     return { createdAt, browserChannel: this.config.browserChannel, stored: true, cookieCount: storageState.cookies.length };
   }
 
-  private async request(url: string, contentType: ContentType): Promise<ClassifiedResponse> {
+  private async request(url: string, contentType: ContentType, requestIntervalSeconds?: number): Promise<ClassifiedResponse> {
     if (!isAllowedRequestUrl(url)) {
       throw new AvitoMcpError("REQUEST_FAILED", "Refusing to request a host other than www.avito.ru.");
     }
@@ -295,11 +296,13 @@ export class AvitoBrowserSession {
 
     return this.queue.run(async () => {
       await this.enforceRateLimitBackoff();
-      const page = await this.ensureHeadlessPage();
-      let result = await this.classifiedRequest(page, url, contentType);
+      const intervalMs = requestIntervalSeconds === undefined
+        ? this.config.minimumRequestIntervalMs
+        : requestIntervalSeconds * MS_PER_SECOND;
+      let result = await this.classifiedRequest(url, contentType, intervalMs);
       if (result.verdict === "challenge") {
-        await this.passChallenge(page);
-        result = await this.classifiedRequest(page, url, contentType);
+        await this.passChallenge(await this.ensureHeadlessPage());
+        result = await this.classifiedRequest(url, contentType, intervalMs);
       }
       this.armIdleTimer();
       const failure = unusableResponseError(result);
@@ -355,14 +358,12 @@ export class AvitoBrowserSession {
       .catch(() => undefined);
   }
 
-  private async classifiedRequest(page: Page, url: string, contentType: ContentType): Promise<ClassifiedResponse> {
-    await this.waitForRequestSlot();
-    try {
-      const response = await this.rawRequest(page, url, contentType);
-      return { response, verdict: classifyResponse(response) };
-    } finally {
-      this.lastRequestAt = Date.now();
-    }
+  private async classifiedRequest(url: string, contentType: ContentType, intervalMs: number): Promise<ClassifiedResponse> {
+    await this.waitForRequestSlot(intervalMs);
+    const page = await this.ensureHeadlessPage();
+    this.lastRequestAt = Date.now();
+    const response = await this.rawRequest(page, url, contentType);
+    return { response, verdict: classifyResponse(response) };
   }
 
   private async launch(headless: boolean): Promise<Browser> {
@@ -465,8 +466,8 @@ export class AvitoBrowserSession {
     );
   }
 
-  private async waitForRequestSlot(): Promise<void> {
-    const interval = this.config.minimumRequestIntervalMs + Math.random() * MAX_REQUEST_JITTER_MS;
+  private async waitForRequestSlot(intervalMs: number): Promise<void> {
+    const interval = intervalMs + Math.random() * MAX_REQUEST_JITTER_MS;
     const remaining = interval - (Date.now() - this.lastRequestAt);
     if (remaining > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, remaining));

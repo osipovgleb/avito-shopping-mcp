@@ -18,8 +18,11 @@ import { parseItem, parseSellerUserKey, readBuyerItem } from "./item-page.js";
 import { parseLocations, parseProfileItems, parseRatingsPage, parseSearchPage } from "./parsers.js";
 import type {
   ItemDetails,
+  ListingCondition,
+  ListingConditionFilter,
   Location,
   ProfileItemsResult,
+  SearchItem,
   SearchResult,
   SearchSort,
   SellerReview,
@@ -36,6 +39,8 @@ export interface SearchInput {
   priceMax?: number | undefined;
   page?: number | undefined;
   limit?: number | undefined;
+  requestIntervalSeconds?: number | undefined;
+  condition?: ListingConditionFilter | undefined;
 }
 
 type SellerReviews = Pick<SellerReviewsResult, "rating" | "reviews">;
@@ -81,35 +86,66 @@ export class AvitoClient {
 
   async search(input: SearchInput): Promise<SearchResult> {
     const query = validSearchQuery(input);
-    const location = await this.resolveLocation(input.location ?? MOSCOW.name);
+    const location = await this.resolveLocation(input.location ?? MOSCOW.name, input.requestIntervalSeconds);
     const sort = input.sort ?? "default";
     const page = input.page ?? 1;
     const result = parseSearchPage(
       await this.session.requestJson(
         searchApiUrl({ query, locationId: location.id, sort, page, priceMin: input.priceMin, priceMax: input.priceMax }),
+        input.requestIntervalSeconds,
       ),
       location,
     );
-    const items = result.items.slice(0, input.limit ?? DEFAULT_SEARCH_LIMIT);
+    const limit = input.limit ?? DEFAULT_SEARCH_LIMIT;
+    const items = input.condition && input.condition !== "any"
+      ? await this.filterByCondition(result.items, input.condition, limit, input.requestIntervalSeconds)
+      : result.items.slice(0, limit);
     return { query, location, sort, page, totalCount: result.totalCount, count: items.length, items };
   }
 
-  async item(item: string): Promise<ItemDetails> {
-    const { buyerItem, url } = await this.loadBuyerItem(parseItemId(item));
+  async listingCondition(id: number, requestIntervalSeconds?: number): Promise<ListingCondition | null> {
+    try {
+      const item = await this.item(String(id), requestIntervalSeconds);
+      if (item.id !== id || item.active === false) return null;
+      const value = item.characteristics.find(({ name }) => name.toLowerCase() === "состояние")?.value.toLowerCase();
+      if (value && /^(новое|новый|новая|новые|новое с биркой|новое без бирки)$/u.test(value)) return "new";
+      if (value && /^(б\s*\/\s*у|бывш(?:ий|ая|ее) в употреблении|как нов(?:ое|ый|ая)|отличное|хорошее|удовлетворительное|требуется ремонт)$/u.test(value)) return "used";
+      return null;
+    } catch (error) {
+      if (error instanceof AvitoMcpError && error.code === "ITEM_NOT_FOUND") return null;
+      throw error;
+    }
+  }
+
+  private async filterByCondition(
+    candidates: SearchItem[], condition: ListingCondition, limit: number, requestIntervalSeconds?: number,
+  ): Promise<SearchItem[]> {
+    const items: SearchItem[] = [];
+    for (const candidate of candidates) {
+      if (items.length >= limit) break;
+      if (await this.listingCondition(candidate.id, requestIntervalSeconds) === condition) {
+        items.push({ ...candidate, condition });
+      }
+    }
+    return items;
+  }
+
+  async item(item: string, requestIntervalSeconds?: number): Promise<ItemDetails> {
+    const { buyerItem, url } = await this.loadBuyerItem(parseItemId(item), requestIntervalSeconds);
     return parseItem(buyerItem, url);
   }
 
-  async profileItems(profile: string, limit = PROFILE_ITEMS_PAGE_SIZE, page = 1): Promise<ProfileItemsResult> {
-    const result = parseProfileItems(await this.session.requestJson(profileItemsApiUrl(profile, page)));
+  async profileItems(profile: string, limit = PROFILE_ITEMS_PAGE_SIZE, page = 1, requestIntervalSeconds?: number): Promise<ProfileItemsResult> {
+    const result = parseProfileItems(await this.session.requestJson(profileItemsApiUrl(profile, page), requestIntervalSeconds));
     const items = result.items.slice(0, limit);
     return { page, totalCount: result.totalCount, count: items.length, items };
   }
 
-  async sellerReviews(item: string, limit = DEFAULT_REVIEWS_LIMIT): Promise<SellerReviewsResult> {
-    const { buyerItem, url } = await this.loadBuyerItem(parseItemId(item));
+  async sellerReviews(item: string, limit = DEFAULT_REVIEWS_LIMIT, requestIntervalSeconds?: number): Promise<SellerReviewsResult> {
+    const { buyerItem, url } = await this.loadBuyerItem(parseItemId(item), requestIntervalSeconds);
     const listing = parseItem(buyerItem, url);
     const userKey = parseSellerUserKey(buyerItem);
-    const { rating, reviews } = userKey === null ? NO_REVIEWS : await this.loadReviews(userKey, limit);
+    const { rating, reviews } = userKey === null ? NO_REVIEWS : await this.loadReviews(userKey, limit, requestIntervalSeconds);
     return {
       listing: { id: listing.id, title: listing.title, url: listing.url },
       seller: listing.seller,
@@ -140,7 +176,7 @@ export class AvitoClient {
     return this.session.shutdown();
   }
 
-  private async resolveLocation(name: string): Promise<Location> {
+  private async resolveLocation(name: string, requestIntervalSeconds?: number): Promise<Location> {
     const key = locationKey(name);
     const cached = this.locations.get(key);
     if (cached) return cached;
@@ -148,26 +184,26 @@ export class AvitoClient {
       throw new AvitoMcpError("LOCATION_NOT_FOUND", "Location must be a Russian city or region name, e.g. Казань.");
     }
 
-    const candidates = parseLocations(await this.session.requestJson(locationsApiUrl(name.trim())));
+    const candidates = parseLocations(await this.session.requestJson(locationsApiUrl(name.trim()), requestIntervalSeconds));
     const location = candidates.find((candidate) => locationKey(candidate.name) === key) ?? candidates[0];
     if (!location) throw new AvitoMcpError("LOCATION_NOT_FOUND", `Avito knows no location named "${name.trim()}".`);
     this.locations.set(key, location);
     return location;
   }
 
-  private async loadReviews(userKey: string, limit: number): Promise<SellerReviews> {
-    let page = parseRatingsPage(await this.session.requestJson(sellerRatingsUrl(userKey)));
+  private async loadReviews(userKey: string, limit: number, requestIntervalSeconds?: number): Promise<SellerReviews> {
+    let page = parseRatingsPage(await this.session.requestJson(sellerRatingsUrl(userKey), requestIntervalSeconds));
     const rating = page.summary;
     const reviews: SellerReview[] = [...page.reviews];
     while (reviews.length < limit && page.nextPage !== null && page.reviews.length > 0) {
-      page = parseRatingsPage(await this.session.requestJson(apiUrl(page.nextPage)));
+      page = parseRatingsPage(await this.session.requestJson(apiUrl(page.nextPage), requestIntervalSeconds));
       reviews.push(...page.reviews);
     }
     return { rating, reviews: reviews.slice(0, limit) };
   }
 
-  private async loadBuyerItem(id: number) {
-    const page = await this.session.requestHtml(itemPageUrl(id));
+  private async loadBuyerItem(id: number, requestIntervalSeconds?: number) {
+    const page = await this.session.requestHtml(itemPageUrl(id), requestIntervalSeconds);
     if (!page) throw new AvitoMcpError("ITEM_NOT_FOUND", `Avito has no listing with id ${id}.`);
     return { buyerItem: readBuyerItem(page.html), url: page.url };
   }
