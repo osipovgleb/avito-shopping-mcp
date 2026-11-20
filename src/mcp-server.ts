@@ -48,11 +48,15 @@ const CONDITION = z.enum(LISTING_CONDITIONS).optional()
 const SEARCH_FILTERS = {
   query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).describe("Search text"),
   location: z.string().trim().min(1).max(100).optional().describe("City or region in Russian (default: Москва)"),
-  sort: z.enum(SEARCH_SORTS).describe("default (relevance), price, price_desc, date (newest first), discount"),
+  sort: z.enum(SEARCH_SORTS).describe(
+    "Sort search results: default (relevance), price (cheapest first), price_desc (most expensive first), date (newest first), or discount (largest discount first).",
+  ),
   priceMin: z.number().int().nonnegative().optional().describe("Minimum price in RUB"),
   priceMax: z.number().int().nonnegative().optional().describe("Maximum price in RUB"),
 };
-const EXPORT_ID_INPUT = z.object({ jobId: z.uuid() });
+const EXPORT_ID_INPUT = z.object({
+  jobId: z.uuid().describe("The job ID returned by avito_start_export. Use the same ID to check or resume that export."),
+});
 
 const INSTRUCTIONS =
   "Use avito_search to find classified listings, then pass a returned listing URL or id to avito_item for details " +
